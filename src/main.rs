@@ -18,120 +18,71 @@
 // Author: Giovanni Campagna <gcampagn@cs.stanford.edu>
 
 use std::result::Result;
-use futures;
-use futures::stream::{StreamExt, TryStreamExt, SplitSink};
-use futures::sink::SinkExt;
 use rustyline::{error::ReadlineError, Editor};
 use tokio::task;
-use serde_json::{Value, json};
-use tokio_tungstenite::WebSocketStream;
-use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite;
 use std::sync::{Arc, Mutex};
 
 mod error;
+mod almond_client;
+use crate::almond_client::AlmondClient;
 use crate::error::AlmondError;
 
-async fn handle_server_message(msg : Value) {
-    println!("Received {}", msg);
-
-    let type_ = msg["type"].as_str().unwrap();
-    match type_ {
-        "id" => {
-            // TODO do something
-            return;
-        }
-
-        "askSpecial" => {
-            // TODO do something
-            return;
-        }
-
-        "text" => {
-            println!("Almond says: {}", msg["text"].as_str().unwrap());
-        }
-
-        "command" => {
-            println!(">> {}", msg["command"].as_str().unwrap());
-        }
-
-        // TODO handle the other messages
-        &_ => {
-            println!(">> unhandled server message of type {}", type_);
-        }
-    };
+struct MessageHandler {
 }
 
-async fn handle_thingtalk(ws : &mut SplitSink<WebSocketStream<TcpStream>, tungstenite::Message>, line : &str) -> Result<(), AlmondError> {
-    ws.send(tungstenite::Message::Text(json!({
-        "type": "tt",
-        "code": line
-    }).to_string())).await?;
-    Ok(())
-}
+impl almond_client::MessageHandler for MessageHandler {
+    fn on_new_text_message(self : &mut MessageHandler, msg : &str) {
+        println!("Almond says: {}", msg);
+    }
 
-async fn handle_command(ws : &mut SplitSink<WebSocketStream<TcpStream>, tungstenite::Message>, line : &str) -> Result<(), AlmondError> {
-    ws.send(tungstenite::Message::Text(json!({
-        "type": "command",
-        "text": line
-    }).to_string())).await?;
-    Ok(())
+    fn on_new_command(self : &mut MessageHandler, msg : &str) {
+        println!(">> {}", msg);
+    }
+
+    fn set_expected(self : &mut MessageHandler, _expected : Option<&str>) {
+        // do nothing yet
+    }
 }
 
 async fn program() -> Result<(), AlmondError> {
-    let (client, _) = tokio_tungstenite::connect_async("ws://127.0.0.1:3000/api/conversation").await?;
-    let (mut sender, mut receiver) = client.split();
+    let handler = Box::new(MessageHandler {});
+    let client = AlmondClient::new("ws://127.0.0.1:3000/api/conversation", handler).await?;
 
-    let reader = async move {
-        while let Some(msg) = receiver.try_next().await? {
-            if let tungstenite::Message::Text(json) = msg {
-                handle_server_message(serde_json::from_str(&json).unwrap()).await;
-            }
-        }
-
-        Ok::<(), AlmondError>(())
-    };
-
-    let writer = async move {
-        let rl = Arc::new(Mutex::new(Editor::<()>::new()));
-        loop {
-            let rl2 = rl.clone();
-            let readline = task::spawn_blocking(move || {
-                rl2.lock().unwrap().readline(">> ")
-            }).await?;
-            match readline {
-                Ok(line) => {
-                    let trimmed = line.trim();
-                    if trimmed.len() == 0 {
-                        continue;
-                    }
-
-                    if trimmed.starts_with("\t ") {
-                        handle_thingtalk(&mut sender, &trimmed[3..]).await?;
-                    } else {
-                        handle_command(&mut sender, &trimmed).await?;
-                    }
+    let rl = Arc::new(Mutex::new(Editor::<()>::new()));
+    loop {
+        let rl2 = rl.clone();
+        let readline = task::spawn_blocking(move || {
+            rl2.lock().unwrap().readline(">> ")
+        }).await?;
+        match readline {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.len() == 0 {
+                    continue;
                 }
 
-                Err(ReadlineError::Interrupted) => {
-                    sender.close().await?;
-                    return Ok::<(), AlmondError>(());
-                }
-
-                Err(ReadlineError::Eof) => {
-                    sender.close().await?;
-                    return Ok::<(), AlmondError>(());
-                }
-
-                Err(err) => {
-                    return Err::<(), AlmondError>(From::from(err));
+                if trimmed.starts_with("\t ") {
+                    client.lock().await.send_thingtalk(&trimmed[3..]).await?;
+                } else {
+                    client.lock().await.send_command(&trimmed).await?;
                 }
             }
-        }
-    };
 
-    futures::try_join!(reader, writer)?;
-    Ok(())
+            Err(ReadlineError::Interrupted) => {
+                client.lock().await.close().await?;
+                return Ok::<(), AlmondError>(());
+            }
+
+            Err(ReadlineError::Eof) => {
+                client.lock().await.close().await?;
+                return Ok::<(), AlmondError>(());
+            }
+
+            Err(err) => {
+                return Err::<(), AlmondError>(From::from(err));
+            }
+        }
+    }
 }
 
 #[tokio::main]

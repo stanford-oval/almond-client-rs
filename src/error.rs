@@ -28,7 +28,8 @@ pub enum AlmondError {
     WebSocketError(tungstenite::Error),
     JSONError(serde_json::Error),
     JoinError(JoinError),
-    ReadlineError(ReadlineError)
+    ReadlineError(ReadlineError),
+    ProtocolError(&'static str)
 }
 
 impl fmt::Display for AlmondError {
@@ -48,6 +49,10 @@ impl fmt::Display for AlmondError {
 
             AlmondError::ReadlineError(err) => {
                 write!(f, "readline error: {}", err)
+            }
+
+            AlmondError::ProtocolError(err) => {
+                write!(f, "protocol error: {}", err)
             }
         }
     }
@@ -94,6 +99,10 @@ impl Error for AlmondError {
 
             AlmondError::ReadlineError(err) => {
                 Some(err)
+            }
+
+            _ => {
+                None
             }
         }
     }
